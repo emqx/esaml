@@ -41,16 +41,22 @@ xml_payload_type(Xml) ->
 %% @doc Unpack and parse a SAMLResponse with given encoding
 -spec decode_response(SAMLEncoding :: binary(), SAMLResponse :: binary()) -> #xmlDocument{}.
 decode_response(?deflate, SAMLResponse) ->
-	XmlData = binary_to_list(zlib:unzip(base64:decode(SAMLResponse))),
-	{Xml, _} = xmerl_scan:string(XmlData, [{namespace_conformant, true}]),
-    Xml;
+    scan_xml(zlib:unzip(base64:decode(SAMLResponse)));
 decode_response(_, SAMLResponse) ->
 	Data = base64:decode(SAMLResponse),
     XmlData = case (catch zlib:unzip(Data)) of
-        {'EXIT', _} -> binary_to_list(Data);
-        Bin -> binary_to_list(Bin)
+        {'EXIT', _} -> Data;
+        Bin -> Bin
     end,
-	{Xml, _} = xmerl_scan:string(XmlData, [{namespace_conformant, true}]),
+    scan_xml(XmlData).
+
+scan_xml(XmlData) when is_binary(XmlData) ->
+    scan_xml(binary_to_list(XmlData));
+scan_xml(XmlData) ->
+	{Xml, _} = xmerl_scan:string(XmlData, [
+        {namespace_conformant, true},
+        {allow_entities, false}
+    ]),
     Xml.
 
 %% @doc Encode a SAMLRequest (or SAMLResponse) as an HTTP-REDIRECT binding
@@ -141,6 +147,57 @@ generate_post_html(Type, Dest, Req, RelayState) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+decode_response_rejects_external_entity_test() ->
+    File = secret_file(),
+    ok = file:write_file(File, <<"sensitive">>),
+    try
+        SAMLResponse = base64:encode(malicious_response(File)),
+        assert_entities_not_allowed(catch decode_response(<<"post">>, SAMLResponse))
+    after
+        file:delete(File)
+    end.
+
+decode_response_rejects_deflated_external_entity_test() ->
+    File = secret_file(),
+    ok = file:write_file(File, <<"sensitive">>),
+    try
+        SAMLResponse = base64:encode(zlib:zip(malicious_response(File))),
+        assert_entities_not_allowed(catch decode_response(?deflate, SAMLResponse))
+    after
+        file:delete(File)
+    end.
+
+decode_response_rejects_internal_entity_test() ->
+    SAMLResponse = base64:encode(internal_entity_response()),
+    assert_entities_not_allowed(catch decode_response(<<"post">>, SAMLResponse)).
+
+decode_response_allows_predefined_entity_test() ->
+    SAMLResponse = base64:encode(<<"<Response>Tom &amp; Jerry</Response>">>),
+    #xmlElement{content = [#xmlText{value = "Tom & Jerry"}]} =
+        decode_response(<<"post">>, SAMLResponse).
+
+assert_entities_not_allowed(Result) ->
+    ?assertMatch(
+        {'EXIT', {fatal, {{error, entities_not_allowed}, _, _, _}}},
+        Result
+    ).
+
+secret_file() ->
+    filename:join([
+        os:getenv("TMPDIR", "/tmp"),
+        "esaml_xxe_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".txt"
+    ]).
+
+malicious_response(File) ->
+    iolist_to_binary([
+        "<?xml version=\"1.0\"?>",
+        "<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file://", File, "\">]>",
+        "<Response>&xxe;</Response>"
+    ]).
+
+internal_entity_response() ->
+    <<"<!DOCTYPE foo [<!ENTITY xxe \"sensitive\">]><Response>&xxe;</Response>">>.
 
 -endif.
 

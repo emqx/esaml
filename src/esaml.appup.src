@@ -1,0 +1,15 @@
+%% -*- mode: erlang -*-
+{"1.1.5",
+ [
+   {<<".*">>, [
+     {load_module, esaml_binding, brutal_purge, soft_purge, []},
+     {load_module, esaml_util, brutal_purge, soft_purge, []}
+   ]}
+ ],
+ [
+   {<<".*">>, [
+     {load_module, esaml_binding, brutal_purge, soft_purge, []},
+     {load_module, esaml_util, brutal_purge, soft_purge, []}
+   ]}
+ ]
+}.
