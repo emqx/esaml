@@ -202,7 +202,7 @@ load_metadata(Url, FPs) ->
         [{Url, Meta}] -> Meta;
         _ ->
             {ok, {{_Ver, 200, _}, _Headers, Body}} = httpc:request(get, {Url, []}, [{autoredirect, true}], []),
-            {Xml, _} = xmerl_scan:string(Body, [{namespace_conformant, true}]),
+            Xml = scan_xml(Body),
             case xmerl_dsig:verify(Xml, Fingerprints) of
                 ok -> ok;
                 Err -> error(Err)
@@ -219,11 +219,20 @@ load_metadata(Url) ->
         [{Url, Meta}] -> Meta;
         _ ->
             {ok, {{_Ver, 200, _}, _Headers, Body}} = httpc:request(get, {Url, []}, [{autoredirect, true}], []),
-            {Xml, _} = xmerl_scan:string(Body, [{namespace_conformant, true}]),
+            Xml = scan_xml(Body),
             {ok, Meta = #esaml_idp_metadata{}} = esaml:decode_idp_metadata(Xml),
             ets:insert(esaml_idp_meta_cache, {Url, Meta}),
             Meta
     end.
+
+scan_xml(XmlData) when is_binary(XmlData) ->
+    scan_xml(binary_to_list(XmlData));
+scan_xml(XmlData) ->
+    {Xml, _} = xmerl_scan:string(XmlData, [
+        {namespace_conformant, true},
+        {allow_entities, false}
+    ]),
+    Xml.
 
 %% @doc Checks for a duplicate assertion using ETS tables in memory on all available nodes.
 %%
@@ -340,5 +349,37 @@ xpath_text_test() ->
     Fun3 = ?xpath_text("/a/b[@name='bar']/c/text()", b, name),
     Rec3 = Fun3(Rec2),
     ?assertMatch(Rec2, Rec3).
+
+scan_xml_rejects_external_entity_test() ->
+    File = secret_file(),
+    ok = file:write_file(File, <<"sensitive">>),
+    try
+        assert_entities_not_allowed(catch scan_xml(malicious_xml(File)))
+    after
+        file:delete(File)
+    end.
+
+scan_xml_allows_predefined_entity_test() ->
+    #xmlElement{content = [#xmlText{value = "Tom & Jerry"}]} =
+        scan_xml(<<"<EntityDescriptor>Tom &amp; Jerry</EntityDescriptor>">>).
+
+assert_entities_not_allowed(Result) ->
+    ?assertMatch(
+        {'EXIT', {fatal, {{error, entities_not_allowed}, _, _, _}}},
+        Result
+    ).
+
+secret_file() ->
+    filename:join([
+        os:getenv("TMPDIR", "/tmp"),
+        "esaml_metadata_xxe_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".txt"
+    ]).
+
+malicious_xml(File) ->
+    iolist_to_binary([
+        "<?xml version=\"1.0\"?>",
+        "<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file://", File, "\">]>",
+        "<EntityDescriptor>&xxe;</EntityDescriptor>"
+    ]).
 
 -endif.
